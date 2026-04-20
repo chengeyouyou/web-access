@@ -16,6 +16,26 @@ let cmdId = 0;
 const pending = new Map(); // id -> {resolve, timer}
 const sessions = new Map(); // targetId -> sessionId
 
+// --- WSL 支持：获取 Windows 主机 IP ---
+let windowsHost = '127.0.0.1';
+if (os.platform() === 'linux') {
+  try {
+    // 检测是否在 WSL 中
+    const release = fs.readFileSync('/proc/version', 'utf-8');
+    if (release.includes('microsoft') || release.includes('WSL')) {
+      // 使用 ip route 获取默认网关（Windows 主机 IP）
+      const { execSync } = await import('node:child_process');
+      const gateway = execSync('ip route | grep default | awk \'{print $3}\'', { encoding: 'utf-8' }).trim();
+      if (gateway) {
+        windowsHost = gateway;
+        console.log(`[CDP Proxy] 检测到 WSL 环境，Windows 主机 IP: ${windowsHost}`);
+      }
+    }
+  } catch (e) {
+    // 非关键错误，使用默认值
+  }
+}
+
 // --- WebSocket 兼容层 ---
 let WS;
 if (typeof globalThis.WebSocket !== 'undefined') {
@@ -34,7 +54,20 @@ if (typeof globalThis.WebSocket !== 'undefined') {
 
 // --- 自动发现 Chrome 调试端口 ---
 async function discoverChromePort() {
-  // 1. 尝试读 DevToolsActivePort 文件
+  // WSL 环境下，直接扫描 Windows 主机的常用端口
+  if (windowsHost !== '127.0.0.1') {
+    const commonPorts = [9222, 9229, 9333];
+    for (const port of commonPorts) {
+      const ok = await checkPort(port, windowsHost);
+      if (ok) {
+        console.log(`[CDP Proxy] WSL 扫描发现 Windows Chrome 调试端口: ${port} (${windowsHost})`);
+        return { port, wsPath: null };
+      }
+    }
+    return null;
+  }
+
+  // 非WSL：1. 尝试读 DevToolsActivePort 文件
   const possiblePaths = [];
   const platform = os.platform();
 
@@ -70,7 +103,7 @@ async function discoverChromePort() {
           // 第二行是带 UUID 的 WebSocket 路径（如 /devtools/browser/xxx-xxx）
           // 非显式 --remote-debugging-port 启动时，Chrome 可能只接受此路径
           const wsPath = lines[1] || null;
-          console.log(`[CDP Proxy] 从 DevToolsActivePort 发现端口: ${port}${wsPath ? ' (带 wsPath)' : ''}`);
+          console.log(`[CDP Proxy] 从 DevToolsActivePort 发现端口: ${port}${wsPath ? ' ( (带 wsPath)' : ''}`);
           return { port, wsPath };
         }
       }
@@ -92,9 +125,9 @@ async function discoverChromePort() {
 
 // 用 TCP 探测端口是否监听——避免 WebSocket 连接触发 Chrome 安全弹窗
 // （WebSocket 探测会被 Chrome 视为调试连接，弹出授权对话框）
-function checkPort(port) {
+function checkPort(port, host = '127.0.0.1') {
   return new Promise((resolve) => {
-    const socket = net.createConnection(port, '127.0.0.1');
+    const socket = net.createConnection(port, host);
     const timer = setTimeout(() => { socket.destroy(); resolve(false); }, 2000);
     socket.once('connect', () => { clearTimeout(timer); socket.destroy(); resolve(true); });
     socket.once('error', () => { clearTimeout(timer); resolve(false); });
@@ -102,8 +135,8 @@ function checkPort(port) {
 }
 
 function getWebSocketUrl(port, wsPath) {
-  if (wsPath) return `ws://127.0.0.1:${port}${wsPath}`;
-  return `ws://127.0.0.1:${port}/devtools/browser`;
+  if (wsPath) return `ws://${windowsHost}:${port}${wsPath}`;
+  return `ws://${windowsHost}:${port}/devtools/browser`;
 }
 
 // --- WebSocket 连接管理 ---

@@ -12,6 +12,26 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PROXY_SCRIPT = path.join(ROOT, 'scripts', 'cdp-proxy.mjs');
 const PROXY_PORT = Number(process.env.CDP_PROXY_PORT || 3456);
 
+// --- WSL 支持：获取 Windows 主机 IP ---
+let windowsHost = '127.0.0.1';
+if (os.platform() === 'linux') {
+  try {
+    // 检测是否在 WSL 中
+    const release = fs.readFileSync('/proc/version', 'utf-8');
+    if (release.includes('microsoft') || release.includes('WSL')) {
+      // 使用 ip route 获取默认网关（Windows 主机 IP）
+      const { execSync } = await import('node:child_process');
+      const gateway = execSync('ip route | grep default | awk \'{print $3}\'', { encoding: 'utf-8' }).trim();
+      if (gateway) {
+        windowsHost = gateway;
+        console.log(`检测到 WSL 环境，Windows 主机 IP: ${windowsHost}`);
+      }
+    }
+  } catch (e) {
+    // 非关键错误，使用默认值
+  }
+}
+
 // --- Node.js 版本检查 ---
 
 function checkNode() {
@@ -63,7 +83,17 @@ function activePortFiles() {
 }
 
 async function detectChromePort() {
-  // 优先从 DevToolsActivePort 文件读取
+  // WSL 环境下，跳过本地文件检测，直接探测 Windows 主机
+  if (windowsHost !== '127.0.0.1') {
+    for (const port of [9222, 9229, 9333]) {
+      if (await checkPort(port, windowsHost)) {
+        return port;
+      }
+    }
+    return null;
+  }
+
+  // 非WSL：优先从 DevToolsActivePort 文件读取
   for (const filePath of activePortFiles()) {
     try {
       const lines = fs.readFileSync(filePath, 'utf8').trim().split(/\r?\n/).filter(Boolean);
